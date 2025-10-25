@@ -38,7 +38,7 @@ class ByteflowAPIError(Exception):
         self.response_text = response_text
 
 # --- Internal API Client Helper ---
-def _make_request(method: str, endpoint: str, params: Optional[Dict[str, Any]] = None, json_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _make_request(method: str, endpoint: str, params: Optional[Dict[str, Any]] = None, json_data: Optional[Dict[str, Any]] = None, bearer_token: str = "dummy_key_for_tests") -> Dict[str, Any]:
     """
     Internal helper to make HTTP requests to the Byteflow Bot API.
 
@@ -58,8 +58,9 @@ def _make_request(method: str, endpoint: str, params: Optional[Dict[str, Any]] =
     try:
         # Update headers with the current BYTEFLOW_API_KEY in case it was set after initial load
         current_headers = HEADERS.copy()
-        bearer_token = os.getenv("BYTEFLOW_API_KEY", "dummy_key_for_tests")
+        # bearer_token = os.getenv("BYTEFLOW_API_KEY", "dummy_key_for_tests")
         # Support both Bearer and X-API-Key header styles
+        print("Requesting with key:", bearer_token)
         current_headers["Authorization"] = f"Bearer {bearer_token}"
         current_headers["X-API-Key"] = bearer_token
 
@@ -89,6 +90,13 @@ class CallIdInput(BaseModel):
     Input model for tools requiring a call ID.
     """
     call_id: str = Field(..., description="The unique identifier of the call.")
+    api_id: str = Field(..., desciption="The Byteflow API.")
+
+class APIKeyInput(BaseModel):
+    """
+    Input model for tools requiring an API key.
+    """
+    api_id: str = Field(..., desciption="The Byteflow API.")
 
 class StartCallInput(BaseModel):
     """
@@ -111,6 +119,7 @@ class StartCallInput(BaseModel):
 
     system_prompt: str = Field(..., description="The System prompt to guide the AI during the call.")
     greeting_text: str = Field(..., description="The greeting message to be played at the start of the call.")
+    api_id: str = Field(..., desciption="The Byteflow API.")
 
 
 # --- FastMCP Server Initialization ---
@@ -165,14 +174,13 @@ def get_call_status(input: CallIdInput) -> Dict[str, Any] | str:
     This includes call duration, start/end times, numbers involved, and associated metadata.
 
     Args:
-        input: An object containing the `call_id` (string) of the call to retrieve status for.
-
+        input: An object containing the `call_id` (string), api_key (string) of the call to retrieve status for.
     Returns:
         A dictionary with call details (e.g., {"call_id": "...", "status": "in-progress", "duration": 120})
         or a string with an error message if the call is not found or the request fails.
     """
     try:
-        response = _make_request("GET", f"/api/call/{input.call_id}")
+        response = _make_request("GET", f"/api/call/{input.call_id}", bearer_token=input.api_id)
         return response
     except ByteflowAPIError as e:
         logger.error(f"Error in get_call_status for call_id {input.call_id}: {e.message}")
@@ -198,7 +206,7 @@ def get_call_transcript(input: CallIdInput) -> Dict[str, Any] | str:
         or a string with an error message if the transcript is not available or the request fails.
     """
     try:
-        response = _make_request("GET", f"/api/call/{input.call_id}/transcript")
+        response = _make_request("GET", f"/api/call/{input.call_id}/transcript", bearer_token=input.api_id)
         return response
     except ByteflowAPIError as e:
         logger.error(f"Error in get_call_transcript for call_id {input.call_id}: {e.message}")
@@ -210,7 +218,7 @@ def get_call_transcript(input: CallIdInput) -> Dict[str, Any] | str:
         return f"An unexpected error occurred: {e}"
 
 @mcp.tool()
-def get_active_calls() -> List[Dict[str, Any]] | str:
+def get_active_calls(input: APIKeyInput) -> List[Dict[str, Any]] | str:
     """
     Lists all currently active calls managed by the Byteflow Bot system.
     This provides an overview of ongoing conversations.
@@ -221,7 +229,7 @@ def get_active_calls() -> List[Dict[str, Any]] | str:
         or a string with an error message if the request fails.
     """
     try:
-        response = _make_request("GET", "/api/calls/active")
+        response = _make_request("GET", "/api/calls/active", bearer_token=input.api_id)
         return response
     except ByteflowAPIError as e:
         logger.error(f"Error in get_active_calls: {e.message}")
@@ -278,6 +286,8 @@ def start_new_call(input: StartCallInput) -> Dict[str, Any] | str:
             - `system_prompt` (string, required): The System prompt to guide the AI during the call.
             - `greeting_text` (string, required): The greeting message to be played at the start of the call.
             - `metadata` (dict, optional): Additional key-value metadata for the call.
+            - `api_id` (string, required): The Byteflow API.
+
 
     Returns:
         A dictionary with the new call's ID and initial status (e.g., {"call_id": "...", "status": "initiated"})
@@ -297,7 +307,7 @@ def start_new_call(input: StartCallInput) -> Dict[str, Any] | str:
         if not did_number:
             # Attempt to auto-select a DID
             try:
-                did_resp = _make_request("POST", "/api/validate-and-fetch-dids")
+                did_resp = _make_request("POST", "/api/validate-and-fetch-dids", bearer_token=input.api_id)
                 dids = []
                 if isinstance(did_resp, dict) and "dids" in did_resp and isinstance(did_resp["dids"], list):
                     dids = did_resp["dids"]
@@ -325,7 +335,7 @@ def start_new_call(input: StartCallInput) -> Dict[str, Any] | str:
         if input.metadata is not None:
             payload["metadata"] = input.metadata
 
-        response = _make_request("POST", "/api/call", json_data=payload)
+        response = _make_request("POST", "/api/call", json_data=payload, bearer_token=input.api_id)
         return response
     except ByteflowAPIError as e:
         logger.error(f"Error in start_new_call to {input.to_number}: {e.message}")
@@ -343,14 +353,14 @@ def force_disconnect_call(input: CallIdInput) -> Dict[str, Any] | str:
     This action cannot be undone and will terminate the call regardless of its current state.
 
     Args:
-        input: An object containing the `call_id` (string) of the call to disconnect.
+        input: An object containing the `call_id` (string), api_key (string) of the call to disconnect.
 
     Returns:
         A dictionary with the call's ID and its new status (e.g., {"call_id": "...", "status": "disconnected"})
         or a string with an error message if the call is not found or cannot be disconnected.
     """
     try:
-        response = _make_request("POST", f"/api/call/{input.call_id}/force-disconnect")
+        response = _make_request("POST", f"/api/call/{input.call_id}/force-disconnect", bearer_token=input.api_id)
         return response
     except ByteflowAPIError as e:
         logger.error(f"Error in force_disconnect_call for call_id {input.call_id}: {e.message}")
